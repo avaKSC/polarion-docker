@@ -264,12 +264,13 @@ docker run -d --name polarion -p 80:80 -p 8025:8025 polarion:local
 
 ### Container Shell Aliases
 
-Two convenience aliases are pre-installed for the `root` user and are available in any interactive shell session inside the container (e.g. `docker exec -it polarion bash`):
+A few convenience aliases/functions are pre-installed for the `root` user and are available in any interactive shell session inside the container (e.g. `docker exec -it polarion bash`):
 
-| Alias        | Effect                                                                                                                                                                                               |
-| :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `plnrestart` | Stops the Polarion service, clears workspace `.config` / `.metadata`, restarts the service, and tails the main log. Useful after updating plugins in the `/opt/polarion/polarion/extensions` folder. |
-| `plnmainlog` | Tails the current `log4j-20*.log` file under `/opt/polarion/data/logs/main/`.                                                                                                                        |
+| Alias        | Effect                                                                                                                                                                                                                                                                                |
+| :----------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `plnrestart` | Stops the Polarion service (waiting up to 2 minutes for a clean shutdown via `polstop`), clears workspace `.config` / `.metadata`, restarts the service, and tails `/var/log/polarion/polarion.log`. Useful after updating plugins in the `/opt/polarion/polarion/extensions` folder. |
+| `polstop`    | Stops the Polarion service and waits (up to a 2 minute timeout) for the server PID file to disappear, printing progress and failing with a non-zero exit code on timeout. Used internally by `plnrestart`, but can also be called directly for a clean stop.                          |
+| `plnmainlog` | Tails the current `log4j-20*.log` file under `/opt/polarion/data/logs/main/`.                                                                                                                                                                                                        |
 
 ### Plugin Development
 
