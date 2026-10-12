@@ -37,6 +37,7 @@ Polarion's installer is proprietary and manual to set up — PostgreSQL, Apache 
     - [Option A: Local Build (Recommended)](#option-a-local-build-recommended)
     - [Option B: Pre-built Images](#option-b-pre-built-images)
     - [Via Docker Compose](#via-docker-compose)
+    - [Data volumes](#data-volumes)
     - [Image tags and versions](#image-tags-and-versions)
     - [Supported versions](#supported-versions)
   - [Configuration \& Customization](#configuration--customization)
@@ -64,7 +65,7 @@ The Docker image and its entrypoint scripts (`polarion_starter.sh` & `entrypoint
 - **Modular Entrypoint System**: Startup logic is split into lightweight scripts in `/opt/polarion/entrypoint.d/` for easy extensibility.
 - **Sensible Polarion Defaults**: REST API with Swagger UI and REST API tokens, permissive CORS, collaboration notifications, and UI stack traces are pre-enabled in `polarion.properties` on every start (see [Default Polarion Properties](#default-polarion-properties)).
 - **WebSocket Support**: Automatically configures Apache `ProxyPassMatch` to enable Polarion LiveDoc collaboration and other real-time features.
-- **SVN HTTP Aliases**: Exposes the bundled Subversion repository externally under both `/repo` and `/repo-local`.
+- **External SVN Access**: Exposes the bundled Subversion repository to SVN clients under `/repo-local` with Polarion user credentials on every supported version (`/repo` stays Polarion-internal, see [External SVN Endpoints](#external-svn-endpoints)).
 - **PostgreSQL Auto-Config**: Sets up `listen_addresses` and `pg_hba.conf` to allow external connections (essential for container networking).
 - **URL Correction**: Automatically fixes `localhost` references in configuration files to `127.0.0.1` for proper container behavior.
 - **Polarion Copilot \& SALT (opt-in)**: Environment variables switch on SALT licensing against a Siemens License Server, enable Polarion Copilot, assign Copilot seats, and seed the Copilot model configuration (see [Polarion Copilot & SALT Licensing](#polarion-copilot--salt-licensing)).
@@ -146,8 +147,8 @@ Since Polarion requires a license and the installation media is proprietary, you
       -e JAVA_OPTS="-Xmx3g -Xms3g" \
       -e JDWP_ENABLED=true \
       -v /etc/localtime:/etc/host-localtime:ro \
-      --volume polarion_repo:/opt/polarion/data/svn \
-      --volume polarion_extensions:/opt/polarion/polarion/extensions \
+      --volume polarion_repo_local:/opt/polarion/data/svn \
+      --volume polarion_extensions_local:/opt/polarion/polarion/extensions \
       polarion:local
     # With Podman
     podman run -d \
@@ -160,8 +161,8 @@ Since Polarion requires a license and the installation media is proprietary, you
       -e JAVA_OPTS="-Xmx3g -Xms3g" \
       -e JDWP_ENABLED=true \
       -v /etc/localtime:/etc/host-localtime:ro \
-      --volume polarion_repo:/opt/polarion/data/svn \
-      --volume polarion_extensions:/opt/polarion/polarion/extensions \
+      --volume polarion_repo_local:/opt/polarion/data/svn \
+      --volume polarion_extensions_local:/opt/polarion/polarion/extensions \
       polarion:local
     # With Apple container (single-file bind mounts aren't verified for this runtime, so pass
     # the host's zone by name instead of mounting /etc/localtime)
@@ -177,8 +178,8 @@ Since Polarion requires a license and the installation media is proprietary, you
       -e JAVA_OPTS="-Xmx3g -Xms3g" \
       -e JDWP_ENABLED=true \
       -e TZ="$(readlink /etc/localtime | sed 's#.*zoneinfo/##')" \
-      -v polarion_repo:/opt/polarion/data/svn \
-      -v polarion_extensions:/opt/polarion/polarion/extensions \
+      -v polarion_repo_local:/opt/polarion/data/svn \
+      -v polarion_extensions_local:/opt/polarion/polarion/extensions \
       polarion:local
     ```
 
@@ -215,8 +216,8 @@ If you have access:
     -e JAVA_OPTS="-Xmx3g -Xms3g" \
     -e JDWP_ENABLED=true \
     -v /etc/localtime:/etc/host-localtime:ro \
-    --volume polarion_repo:/opt/polarion/data/svn \
-    --volume polarion_extensions:/opt/polarion/polarion/extensions \
+    --volume polarion_repo_latest:/opt/polarion/data/svn \
+    --volume polarion_extensions_latest:/opt/polarion/polarion/extensions \
     ghcr.io/phillipboesger/polarion-docker:latest
     ```
     _(Replace `polarion:latest` with the appropriate image name depending on how you built or pulled it)_
@@ -237,8 +238,8 @@ container run -d \
     -e JAVA_OPTS="-Xmx3g -Xms3g" \
     -e JDWP_ENABLED=true \
     -e TZ="$(readlink /etc/localtime | sed 's#.*zoneinfo/##')" \
-    -v polarion_repo:/opt/polarion/data/svn \
-    -v polarion_extensions:/opt/polarion/polarion/extensions \
+    -v polarion_repo_latest:/opt/polarion/data/svn \
+    -v polarion_extensions_latest:/opt/polarion/polarion/extensions \
     ghcr.io/phillipboesger/polarion-docker:latest
 ```
 
@@ -260,6 +261,17 @@ Note: Docker Compose files in this repository are Docker-only. Apple `container`
     ```
 
 The checked-in Compose files cap the Polarion container at `4g` RAM and default the JVM to `-Xmx3g -Xms3g`.
+
+### Data volumes
+
+Only the SVN repository (`/opt/polarion/data/svn`) and the extensions (`/opt/polarion/polarion/extensions`) live in named volumes and survive `docker rm`. Use **one volume pair per Polarion version** (`polarion_repo_v2506` + `polarion_extensions_v2506`, …) and never mount the same SVN volume into two containers:
+
+- The images' Apache configuration checks SVN logins against the `passwd` file inside the SVN volume on Polarion 2410/2506, and against each container's own PostgreSQL on 2512+. Polarion 2410/2506 rewrite that file with their own credentials whenever they start, so every container start on a shared volume changes the SVN credentials the other containers rely on.
+- Extensions are built for one Polarion version (2606 needs Jakarta builds).
+
+`scripts/polarionctl.sh start` and the VS Code tasks derive the volume names from the image tag (`…:v2506` and the locally built `polarion:2506` → `_v2506`, `polarion:local` → `_local`); set `POLARION_DATA_VOLUME` / `POLARION_EXTENSIONS_VOLUME` to use other volumes. Floating tags such as `latest`, `main` or `local` map to one fixed volume even after they move to a newer Polarion release, so prefer a pinned `v<NNNN>` image for data you want to keep. The container records its Polarion version in the SVN volume and logs a warning when the volume was last used by a different version.
+
+Volumes created before this change were called `polarion_repo` / `polarion_extensions` and shared by every version. They are left untouched; a new per-version volume starts empty. To keep working with the old data, set `POLARION_DATA_VOLUME=polarion_repo POLARION_EXTENSIONS_VOLUME=polarion_extensions` for that one version.
 
 ### Image tags and versions
 
@@ -401,12 +413,12 @@ Notes:
 
 ### External SVN Endpoints
 
-After startup, Apache serves the bundled Subversion repository through both of these authenticated endpoints:
+After startup, Apache serves the bundled Subversion repository through two authenticated endpoints:
 
-- `http://<host>/repo`
-- `http://<host>/repo-local`
+- `http://<host>/repo-local`: for SVN clients, scripts and plugins that log in with a Polarion user and that user's Polarion password (default `admin` / `admin`); which paths a user may read or write is still governed by the repository's access file.
+- `http://<host>/repo`: Polarion's own internal endpoint. Don't point external clients at it.
 
-The startup scripts also normalize the bundled SVN password file so the default bootstrap user remains `admin` / `admin`.
+On Polarion 2410/2506, `/repo` authenticates against the `passwd` file, which [since 21 R1](https://blogs.sw.siemens.com/polarion/polarion-alm-21-r1-whats-new-and-noteworthy/) only holds Polarion's system secrets: user passwords live in `passwd_credentials`, and Polarion overwrites any edit to `passwd`. A user login against `/repo` is therefore rejected there: Apache answers 500 because it falls through to the unconfigured LDAP provider, and `svn` fails with `E175002: Unexpected server error 500`. `/repo-local` authenticates against `passwd_credentials` on these versions and against `passwd` on 2512+.
 
 ## Development & Debugging
 
