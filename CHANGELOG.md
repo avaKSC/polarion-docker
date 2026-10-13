@@ -18,8 +18,23 @@ commit, then `git tag <date> && git push origin <date>` and
 
 ## [Unreleased]
 
+### Fixed
+
+- A container started without `-v /etc/localtime:/etc/host-localtime:ro` or `-e TZ=...` now
+  logs a warning that it runs on `Etc/UTC` instead of claiming a "detected" timezone. A plain
+  `docker run` cannot see the host's zone by itself.
+- Timezone auto-detection on Docker Desktop (macOS/Windows): the `/etc/localtime` bind mount is
+  served from Docker's Linux VM there (UTC), so the container silently stayed on UTC. The
+  `docker run` and Compose instructions now pass the host's zone by name
+  (`TZ="$(readlink /etc/localtime | sed 's#.*zoneinfo/##')"`), keeping the mount as a fallback;
+  an empty `TZ` is treated as unset, and a UTC mount logs a NOTE pointing at `-e TZ`.
+
+## [2026-10-13]
+
 ### Changed
 
+- Container shell alias `plnrestart` now waits up to 120s for Polarion to actually stop (new
+  `polstop` helper) before clearing the workspace cache and restarting (#107).
 - `build-and-push.yml` failure diagnostics now include the process list, `java -version`, the
   `config.sh` JVM options, the Polarion log tail, disk/memory and `dmesg` (previously only on
   `v2410`), so the branches share one workflow.
