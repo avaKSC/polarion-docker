@@ -109,6 +109,14 @@ case "${action}" in
 		;;
 	start)
 		echo "Starting Polarion from image ${POLARION_IMAGE} (runtime: ${POLARION_RUNTIME})"
+		echo "Volumes: ${POLARION_DATA_VOLUME} (SVN), ${POLARION_EXTENSIONS_VOLUME} (extensions)"
+		# polarion_repo was the volume every Polarion version shared before volumes were per version.
+		if [ -z "${REQUESTED_POLARION_DATA_VOLUME}" ] && ! polarion_volume_exists "${POLARION_DATA_VOLUME}" \
+			&& polarion_volume_exists polarion_repo; then
+			echo "NOTE: creating a new, empty ${POLARION_DATA_VOLUME} for this Polarion version." >&2
+			echo "      Existing data stays in the old shared volume polarion_repo, which every Polarion version used to share;" >&2
+			echo "      to keep using it, set POLARION_DATA_VOLUME=polarion_repo (and POLARION_EXTENSIONS_VOLUME=polarion_extensions)." >&2
+		fi
 		polarion_ensure_volume "${POLARION_DATA_VOLUME}"
 		polarion_ensure_volume "${POLARION_EXTENSIONS_VOLUME}"
 		polarion_remove_container
@@ -120,6 +128,13 @@ case "${action}" in
 		if [ -n "${SMTP_HOST:-}" ]; then extra_env_args+=(-e "SMTP_HOST=${SMTP_HOST}"); fi
 		if [ -n "${SMTP_PORT:-}" ]; then extra_env_args+=(-e "SMTP_PORT=${SMTP_PORT}"); fi
 		if [ -n "${MAILPIT_EMBEDDED:-}" ]; then extra_env_args+=(-e "MAILPIT_EMBEDDED=${MAILPIT_EMBEDDED}"); fi
+		# POLARION_TZ is auto-detected from this host by polarion-runtime-lib.sh; set it (or
+		# plain TZ) before calling this script to force a different zone instead.
+		if [ -n "${POLARION_TZ}" ]; then
+			extra_env_args+=(-e "TZ=${POLARION_TZ}")
+		else
+			echo "NOTE: could not detect this host's timezone; the container will default to Etc/UTC. Set POLARION_TZ=Region/City to fix this." >&2
+		fi
 
 		if polarion_is_apple_container_runtime; then
 			polarion_ensure_container_system
@@ -154,6 +169,7 @@ case "${action}" in
 				--restart unless-stopped
 				--cpus "${POLARION_CONTAINER_CPUS}"
 				--memory "${POLARION_CONTAINER_MEMORY}"
+				--stop-timeout 120
 				-p "${POLARION_HTTP_PORT}:80"
 				-p "${POLARION_DB_PORT}:5433"
 				-p "${POLARION_JDWP_PORT}:5005"
@@ -172,12 +188,7 @@ case "${action}" in
 		polarion_wait_for_http_access
 		;;
 	stop)
-		if polarion_is_apple_container_runtime; then
-			container stop "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
-			container delete --force "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
-		else
-			docker rm -f "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
-		fi
+		polarion_remove_container
 		;;
 	logs)
 		polarion_runtime_exec "${POLARION_CONTAINER_NAME}" 'tail -f $(ls -t /opt/polarion/data/logs/main/*.log | head -n 1)'
