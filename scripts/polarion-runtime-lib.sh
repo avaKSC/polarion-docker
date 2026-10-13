@@ -18,13 +18,20 @@ POLARION_MAILPIT_PORT="${POLARION_MAILPIT_PORT:-8025}"
 POLARION_BIND_HOST="${POLARION_BIND_HOST:-127.0.0.1}"
 POLARION_JAVA_OPTS="${POLARION_JAVA_OPTS:--Xmx3g -Xms3g}"
 POLARION_JDWP_ENABLED="${POLARION_JDWP_ENABLED:-true}"
+# Container clock timezone. Auto-detected from this host below unless set explicitly here
+# (or via plain TZ) to force a different zone.
+POLARION_TZ="${POLARION_TZ:-${TZ:-}}"
 POLARION_PLATFORM="${POLARION_PLATFORM:-linux/amd64}"
 POLARION_CONTAINER_CPUS="${POLARION_CONTAINER_CPUS:-8}"
 POLARION_CONTAINER_MEMORY="${POLARION_CONTAINER_MEMORY:-4g}"
 POLARION_BUILDER_CPUS="${POLARION_BUILDER_CPUS:-8}"
 POLARION_BUILDER_MEMORY="${POLARION_BUILDER_MEMORY:-8g}"
-POLARION_DATA_VOLUME="${POLARION_DATA_VOLUME:-polarion_repo}"
-POLARION_EXTENSIONS_VOLUME="${POLARION_EXTENSIONS_VOLUME:-polarion_extensions}"
+# SVN repository and extensions volumes. Default: one pair per Polarion version, derived from
+# POLARION_IMAGE by polarion_resolve_volumes below; set these to pin specific volumes.
+REQUESTED_POLARION_DATA_VOLUME="${POLARION_DATA_VOLUME-}"
+REQUESTED_POLARION_EXTENSIONS_VOLUME="${POLARION_EXTENSIONS_VOLUME-}"
+POLARION_DATA_VOLUME="${POLARION_DATA_VOLUME:-}"
+POLARION_EXTENSIONS_VOLUME="${POLARION_EXTENSIONS_VOLUME:-}"
 POLARION_DATA_DIR="${POLARION_DATA_DIR:-${REPO_ROOT}/data}"
 POLARION_FILES_DIR="${POLARION_FILES_DIR:-${REPO_ROOT}/files}"
 POLARION_DOCKERFILE="${POLARION_DOCKERFILE:-${REPO_ROOT}/Dockerfile}"
@@ -46,6 +53,34 @@ polarion_command_available() {
 
 polarion_host_is_apple_silicon() {
 	[[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]
+}
+
+polarion_detect_host_timezone() {
+	# Reads this host's own timezone directly, no container/bind-mount needed since this
+	# script already runs on the host. Tries, in order: /etc/localtime's symlink target
+	# (macOS and most Linux distros point it at a "zoneinfo/<Zone>" path), "timedatectl"
+	# (systemd hosts where /etc/localtime may be a regular file instead of a symlink), then
+	# /etc/timezone's content (Debian/Ubuntu convention). Prints nothing if all three fail,
+	# so callers fall back to the image's built-in default — and should say so, since a
+	# silent UTC fallback here is easy to miss.
+	local target=""
+
+	if [ -L /etc/localtime ]; then
+		target="$(readlink /etc/localtime 2>/dev/null || true)"
+		[ -z "$target" ] || { printf '%s\n' "${target#*zoneinfo/}"; return 0; }
+	fi
+
+	if polarion_command_available timedatectl; then
+		target="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+		[ -z "$target" ] || { printf '%s\n' "$target"; return 0; }
+	fi
+
+	if [ -f /etc/timezone ]; then
+		target="$(head -n1 /etc/timezone 2>/dev/null || true)"
+		[ -z "$target" ] || { printf '%s\n' "$target"; return 0; }
+	fi
+
+	return 0
 }
 
 polarion_runtime_has_named_container() {
@@ -288,28 +323,64 @@ polarion_sync_repo_license() {
 		'chown polarion:www-data /opt/polarion/polarion/license/polarion.lic && chmod 0644 /opt/polarion/polarion/license/polarion.lic'
 }
 
-polarion_ensure_volume() {
-	local volume_name="$1"
-
+polarion_volume_exists() {
 	polarion_require_selected_runtime_command
 
 	if polarion_is_apple_container_runtime; then
-		if ! container volume inspect "${volume_name}" >/dev/null 2>&1; then
-			container volume create "${volume_name}" >/dev/null
-		fi
+		container volume inspect "$1" >/dev/null 2>&1
 	else
-		if ! docker volume inspect "${volume_name}" >/dev/null 2>&1; then
-			docker volume create "${volume_name}" >/dev/null
-		fi
+		docker volume inspect "$1" >/dev/null 2>&1
 	fi
+}
+
+polarion_ensure_volume() {
+	local volume_name="$1"
+
+	polarion_volume_exists "${volume_name}" && return 0
+	if polarion_is_apple_container_runtime; then
+		container volume create "${volume_name}" >/dev/null
+	else
+		docker volume create "${volume_name}" >/dev/null
+	fi
+}
+
+polarion_volume_suffix_for_image() {
+	# Polarion versions must never share an SVN repository or extensions directory (versions
+	# keep SVN credentials differently and extensions are built per version). ghcr.io/...:v2506 and the locally built polarion:2506 both map to
+	# "v2506"; any other tag (local, latest, main) is used as-is, sanitized for a volume name.
+	local ref="${1%%@*}" name tag
+	name="${ref##*/}"
+	tag="latest"
+	[[ "${name}" == *:* ]] && tag="${name##*:}"
+	if [[ "${tag}" =~ ^v?([0-9]{4})([._-].*)?$ ]]; then
+		printf 'v%s\n' "${BASH_REMATCH[1]}"
+	else
+		printf '%s' "${tag}" | tr -c 'A-Za-z0-9_.-' '_'
+		printf '\n'
+	fi
+}
+
+polarion_resolve_volumes() {
+	local suffix
+	suffix="$(polarion_volume_suffix_for_image "${POLARION_IMAGE}")"
+	[ -n "${REQUESTED_POLARION_DATA_VOLUME}" ] || POLARION_DATA_VOLUME="polarion_repo_${suffix}"
+	[ -n "${REQUESTED_POLARION_EXTENSIONS_VOLUME}" ] || POLARION_EXTENSIONS_VOLUME="polarion_extensions_${suffix}"
 }
 
 polarion_remove_container() {
 	polarion_require_selected_runtime_command
 
+	# Try a real graceful stop first (polarion_starter.sh's shutdown trap needs time to
+	# stop Polarion/Apache/PostgreSQL in order) before the force-delete fallback, which
+	# only matters for a container that's already stopped/gone or wedged. This can take up
+	# to 2 minutes for a container that's actually running, so say so up front instead of
+	# leaving the caller staring at a silent hang.
+	echo "Stopping any existing ${POLARION_CONTAINER_NAME} container (up to 120s for a clean shutdown)..."
 	if polarion_is_apple_container_runtime; then
+		container stop --time 120 "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
 		container delete --force "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
 	else
+		docker stop -t 120 "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
 		docker rm -f "${POLARION_CONTAINER_NAME}" >/dev/null 2>&1 || true
 	fi
 }
@@ -417,5 +488,10 @@ polarion_autodetect_container_name() {
 	fi
 }
 
+if [ -z "${POLARION_TZ}" ]; then
+	POLARION_TZ="$(polarion_detect_host_timezone)"
+fi
+
 polarion_select_runtime
 polarion_autodetect_container_name
+polarion_resolve_volumes

@@ -53,7 +53,7 @@ POLARION_RUNTIME=container bash scripts/polarionctl.sh list-zips
 POLARION_RUNTIME=container POLARION_ZIP=PolarionALM_2512.zip bash scripts/polarionctl.sh build-image
 ```
 
-Start Polarion locally:
+Start Polarion locally (`-e TZ=...` matches the container clock to this host's timezone; `scripts/polarionctl.sh start` does this automatically):
 
 ```bash
 container run -d \
@@ -67,8 +67,9 @@ container run -d \
   -p 0.0.0.0:5005:5005 \
   -e JAVA_OPTS="-Xmx3g -Xms3g" \
   -e JDWP_ENABLED=true \
-  -v polarion_repo:/opt/polarion/data/svn \
-  -v polarion_extensions:/opt/polarion/polarion/extensions \
+  -e TZ="$(readlink /etc/localtime | sed 's#.*zoneinfo/##')" \
+  -v polarion_repo_local:/opt/polarion/data/svn \
+  -v polarion_extensions_local:/opt/polarion/polarion/extensions \
   polarion:local
 ```
 

@@ -2,7 +2,12 @@
 # Configure JDWP debugging by modifying config.sh before service start
 CONFIG_FILE="/opt/polarion/etc/config.sh"
 
-# Polarion 2506 still ships biased-locking flags that were removed in modern JDKs.
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "WARNING: $CONFIG_FILE not found; skipping Java/JDWP configuration." >&2
+    return 1
+fi
+
+# Polarion's config.sh ships biased-locking flags that JDK 18+ no longer accepts.
 # Strip just the flag tokens (not the whole line) so the config's closing
 # quote or backslash continuation on the same line survives intact.
 sed -i 's/-XX:+UseBiasedLocking//' "$CONFIG_FILE"
